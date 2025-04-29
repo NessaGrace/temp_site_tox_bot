@@ -33,8 +33,8 @@ except KeyError as e:
     print(f"ERROR: Environment variable not set: {e}")
     exit()
 except Exception as e:
-    print(f"ERROR setting up APIs: {e}")
-    exit()
+        print(f"ERROR setting up APIs: {e}")
+        exit()
 
 
 # --- Case Site Data (Now with full paragraph descriptions) ---
@@ -48,7 +48,6 @@ case_sites = {
 }
 
 # --- Helper Functions ---
-
 def get_pending_bids_data():
     """Fetches rows where 'Gemini Feedback' is empty and includes their row index."""
     all_data = bids_worksheet.get_all_records()
@@ -68,17 +67,21 @@ def evaluate_reasoning(team_name, specialty, reasoning, case_name):
         return {"quality": "Error", "feedback": "Case details not found in script."}
 
     case_description = case_sites[case_name]
+    specialty_options = ["aerobic", "anaerobic", "photosynthetic", "heterotrophic"]
 
     prompt = f"""You are an environmental microbiology expert evaluating a remediation bid proposal.
     Site Details: {case_description}
     Bidding Team's Specialty: {specialty}
     Team's Reasoning Provided: "{reasoning}"
+    The microbial specialty must be one of the following: {', '.join(specialty_options)}.
+    Participants can describe how their chosen specialty will be modified or who they could partner with for a different specialty, but they must choose one of the four.
 
-    Based *only* on the reasoning provided, evaluate if the proposed approach using {specialty} microbes is technically sound and addresses potential economic feasibility for remediating the contamination described in the 'Site Details'.
+    Based *only* on the reasoning provided, evaluate if the proposed approach using {specialty} microbes is technically sound for remediating the contamination described in the 'Site Details'.
     Provide a brief (1-2 sentence) explanation for your evaluation.
     Conclude your entire response *strictly* with one of the following on a new line:
-    Bid Quality: Good
-    Bid Quality: Poor
+    Bid Quality: Highly competitive
+    Bid Quality: Eligible
+    Bid Quality: Unfunded
     """
     try:
         response = model.generate_content(prompt)
@@ -87,12 +90,15 @@ def evaluate_reasoning(team_name, specialty, reasoning, case_name):
         text = response.text.strip()
         quality = "Error"
         feedback = text
-        if text.endswith("Bid Quality: Good"):
-            quality = "Good"
-            feedback = text.replace("Bid Quality: Good", "").strip()
-        elif text.endswith("Bid Quality: Poor"):
-            quality = "Poor"
-            feedback = text.replace("Bid Quality: Poor", "").strip()
+        if text.endswith("Bid Quality: Highly competitive"):
+            quality = "Highly competitive"
+            feedback = text.replace("Bid Quality: Highly competitive", "").strip()
+        elif text.endswith("Bid Quality: Eligible"):
+            quality = "Eligible"
+            feedback = text.replace("Bid Quality: Eligible", "").strip()
+        elif text.endswith("Bid Quality: Unfunded"):
+            quality = "Unfunded"
+            feedback = text.replace("Bid Quality: Unfunded", "").strip()
         else:
             feedback = f"Parsing Error: Unexpected LLM response format.\n{text}" # Log unexpected format
         # --- End Basic Parsing ---
@@ -104,23 +110,24 @@ def evaluate_reasoning(team_name, specialty, reasoning, case_name):
         print(f"ERROR evaluating bid for {team_name}: {e}")
         return {"quality": "Error", "feedback": str(e)}
 
-def compare_and_select_winner(good_bids, case_name):
-    """Asks Gemini to compare 'Good' bids and select the best based on the case description from the script."""
+def compare_and_select_winner(highly_competitive_bids, eligible_bids, case_name):
+    """Asks Gemini to compare 'Highly competitive' and 'Eligible' bids and select the best based on the case description from the script."""
     if case_name not in case_sites:
         print(f"WARNING: Case details for '{case_name}' not found in script for comparison.")
         return None
 
     case_description = case_sites[case_name]
+    all_bids_to_compare = highly_competitive_bids + eligible_bids # Combine highly competitive and eligible bids
 
-    if not good_bids:
+    if not all_bids_to_compare:
         return None # No bids to compare
-    if len(good_bids) == 1:
-        return good_bids[0]['SheetRowIndex'] # The only good bid wins
+    if len(all_bids_to_compare) == 1:
+        return all_bids_to_compare[0]['SheetRowIndex'] # The only bid wins
 
     proposals_text = ""
     bid_map = {} # Map proposal number back to SheetRowIndex
 
-    for i, bid in enumerate(good_bids):
+    for i, bid in enumerate(all_bids_to_compare):
         proposal_num = i + 1
         proposals_text += f"Proposal {proposal_num}:\n"
         proposals_text += f"  Team: {bid['Team Name']}\n"
@@ -128,7 +135,8 @@ def compare_and_select_winner(good_bids, case_name):
         proposals_text += f"  Reasoning: \"{bid['Reasoning for Bid']}\"\n\n"
         bid_map[proposal_num] = bid['SheetRowIndex']
 
-    prompt = f"""You are an environmental microbiology expert selecting the single best proposal to remediate the following site: {case_description}. The following proposals have already been deemed technically feasible based on their reasoning.
+    prompt = f"""You are an environmental microbiology expert selecting the single best proposal to remediate the following site: {case_description}. The following proposals have been deemed either technically sound or potentially viable based on their reasoning.
+    The microbial specialty used must be one of the following: aerobic, anaerobic, photosynthetic, or heterotrophic. Participants can describe how their chosen specialty will be modified or who they could partner with for a different specialty, but they must choose one of the four.
 
     Compare these proposals based *only* on the convincingness, clarity, and potential efficiency implied by their reasoning. Which proposal presents the strongest overall case for this specific site?
 
@@ -148,8 +156,9 @@ def compare_and_select_winner(good_bids, case_name):
                 winner_num_str = winner_line.split(":")[-1].strip()
                 winner_num = int(winner_num_str)
                 if winner_num in bid_map:
-                    print(f"  Comparison Winner: Proposal {winner_num} (Row {bid_map[winner_num]})")
-                    return bid_map[winner_num] # Return the SheetRowIndex
+                    winning_row_index = bid_map[winner_num]
+                    print(f"  Comparison Winner: Proposal {winner_num} (Row {winning_row_index})")
+                    return winning_row_index # Return the SheetRowIndex
                 else:
                     print(f"ERROR: Gemini specified winning proposal number {winner_num}, which is invalid.")
                     return None # Invalid number returned
@@ -178,7 +187,7 @@ def update_sheet_row(row_index, status, feedback, quality, is_winner, points):
         cell_updates = [
             gspread.Cell(row_index, status_col, status),
             gspread.Cell(row_index, feedback_col, feedback),
-            gspread.Cell(row_index, quality_col, quality),
+            gspread.Cell(row_index, quality_col, quality), # Keep original quality
             gspread.Cell(row_index, winner_col, "Yes" if is_winner else "No"),
             gspread.Cell(row_index, points_col, points)
         ]
@@ -248,46 +257,56 @@ else:
         case_description = case_sites[case_name]
         print(f"  Case Description: {case_description}")
 
-        good_bids_list = [] # Store dicts of bids rated 'Good'
+        highly_competitive_bids_list = [] # Store dicts of bids rated 'Highly competitive'
+        eligible_bids_list = [] # Store dicts of bids rated 'Eligible'
         processed_rows = [] # Keep track of rows processed in this batch for this case
 
         # 1. Evaluate each bid individually
         for index, row_data in bids_for_case_df.iterrows():
             sheet_row_idx = row_data['SheetRowIndex']
             processed_rows.append(sheet_row_idx)
-            print(f" Evaluating Bid - Row: {sheet_row_idx}, Team: {row_data['Team Name']}")
+            print(f"  Evaluating Bid - Row: {sheet_row_idx}, Team: {row_data['Team Name']}")
 
             eval_result = evaluate_reasoning(
                 row_data['Team Name'],
                 row_data['Microbial Specialty'], # Adjust column name if needed
-                row_data['Reasoning for Bid'],   # Adjust column name if needed
-                case_name                        # Pass the case name to retrieve description
+                row_data['Reasoning for Bid'], # Adjust column name if needed
+                case_name # Pass the case name to retrieve description
             )
 
-            # Store good bids for comparison later
-            if eval_result["quality"] == "Good":
-                good_bids_list.append(row_data.to_dict())
+            # Store bids based on their evaluation
+            if eval_result["quality"] == "Highly competitive":
+                highly_competitive_bids_list.append(row_data.to_dict())
+            elif eval_result["quality"] == "Eligible":
+                eligible_bids_list.append(row_data.to_dict())
 
             # Update the sheet immediately with individual evaluation result (but not winner status yet)
             update_sheet_row(sheet_row_idx, "Evaluated", eval_result["feedback"], eval_result["quality"], False, 0)
 
-        # 2. Compare 'Good' bids and select winner for this case
+        # 2. Compare 'Highly competitive' and 'Eligible' bids and select winner for this case
         winning_row_index = None
-        if good_bids_list:
-            print(f" Comparing {len(good_bids_list)} 'Good' bid(s) for {case_name}...")
-            winning_row_index = compare_and_select_winner(good_bids_list, case_name) # Pass the case name
+        if highly_competitive_bids_list or eligible_bids_list: #check if either list has bids
+            print(f"  Comparing bids for {case_name}...")
+            winning_row_index = compare_and_select_winner(highly_competitive_bids_list, eligible_bids_list, case_name) # Pass both lists
 
             if winning_row_index:
-                print(f"  Winner for {case_name} determined: Row {winning_row_index}")
+                print(f"   Winner for {case_name} determined: Row {winning_row_index}")
                 # Update the winning row specifically
-                update_sheet_row(winning_row_index, "Evaluated", "Selected as Best Bid", "Good", True, 1)
+                #  The quality should come from the original evaluation
+                winning_bid = next((bid for bid in highly_competitive_bids_list + eligible_bids_list if bid['SheetRowIndex'] == winning_row_index), None)
+                if winning_bid:
+                    original_quality = winning_bid.get('Bid Quality')
+                    update_sheet_row(winning_row_index, "Evaluated", "Selected as Best Bid", original_quality, True, 1)
+                else:
+                    print(f"ERROR: Could not find winning bid in evaluated bids.")
+                    update_sheet_row(winning_row_index, "Evaluated", "Selected as Best Bid", "Error", True, 1) # set to error, so we can debug
             else:
-                print(f"  No single winner determined for {case_name} among 'Good' bids.")
-                # No points awarded if no winner selected from comparison
-
+                print(f"  No single winner determined for {case_name}.")
+                #  No points awarded if no winner selected from comparison
         else:
-            print(f"  No 'Good' quality bids submitted for {case_name}.")
+            print(f"  No 'Highly competitive' or 'Eligible' quality bids submitted for {case_name}.")
 
+        # 3. Award points.  Only the winner gets points.
 
 # --- Final Step ---
 update_leaderboard()
